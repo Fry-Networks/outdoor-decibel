@@ -13,6 +13,10 @@ import pysftp
 import uuid
 from cryptography.fernet import Fernet
 import json
+import requests
+import psutil
+
+url = 'https://airback.frynetworks.com/api/submitHDMiner'
 
 def get_decibel(data):
     fourier = np.fft.fft(data)
@@ -20,6 +24,12 @@ def get_decibel(data):
     power = np.abs(fourier) ** 2
     mean_power = np.average(power)
     return 10 * np.log10(mean_power)
+
+def read_miner_key():
+    miner_key_file = f"minerkey.txt"
+    with open(miner_key_file, 'r') as f:
+        lines = f.read().splitlines()
+    return ''.join(lines)
 
 def write_to_log(db, current_file):
     now = datetime.datetime.now()
@@ -29,10 +39,10 @@ def write_to_log(db, current_file):
 def upload_to_sftp(current_file, config):
     now = datetime.datetime.now()
     local_filename = current_file
-    remote_filename = f"/home/fryscrypto/outdoor_decibel/FRYoUTdOORdecibels_{mac}_{now.strftime('%m%d%Y_%H%M%S')}.log"
+    remote_filename = f"/home/fryscrypto/outdoor_decibel/FRYdecibels_{miner_key}_{now.strftime('%m%d%Y_%H%M%S')}.log"
     cnopts = pysftp.CnOpts()
     cnopts.hostkeys = None 
-    with pysftp.Connection(config['host'], username=config['username'], password=config['password'], cnopts=cnopts) as sftp:
+    with pysftp.Connection("23.19.26.198", username="devdoctor", password="wtf.7001", cnopts=cnopts) as sftp:
         sftp.put(local_filename, remote_filename)
     os.remove(local_filename)  # removes local file after upload
 
@@ -46,6 +56,14 @@ def owen_decrypt(key, ciphertext):
 p = pyaudio.PyAudio()
 stream = p.open(format=pyaudio.paInt16, channels=1, rate=44100, input=True, frames_per_buffer=1024)
 mac = '-'.join(['{:02x}'.format((uuid.getnode() >> i) & 0xff) for i in range(0,8*6,8)][::-1])
+mac_list = []
+
+addrs = psutil.net_if_addrs()
+for iface, addr_list in addrs.items():
+    for addr in addr_list:
+        if addr.family == psutil.AF_LINK:
+            mac_list.append(addr.address)
+            print(f"Interface: {iface}, MAC Address: {addr.address}")
 
 r = b'2\xad\xee\x9a\x18\x94\xf3[\xd2l\xb6\x94`\xfc\xe4\xee@\x84\xe9\xce4$Z\xbdu\xdc\x84\xac\xaaZ.z'
 d = b'\x15H\xedt\xc71\x1a\x99\xab(\x07\xa6\x83\x0cW\x01\xa7\xc4\xb9\x18\xe2\x13Oh\x01<q\xad"\xe0H\x8f'
@@ -57,11 +75,12 @@ literal_t012 =  owen_decrypt(d, b) #
 encrypted_config = owen_decrypt(r, k)
 process_t054 = Fernet(literal_t012)
 config = json.loads(process_t054.decrypt(encrypted_config))
+miner_key = read_miner_key()
 
 last_upload_hour = datetime.datetime.now().hour
 # Initialize the current_file variable
 now = datetime.datetime.now()
-current_file = f"FRYdecibels_{mac}_{now.strftime('%m%d%Y_%H%M%S')}.log"
+current_file = f"FRYdecibels_{miner_key}_{now.strftime('%m%d%Y_%H%M%S')}.log"
 
 while True:
     now = datetime.datetime.now()
@@ -69,13 +88,27 @@ while True:
     data = np.frombuffer(stream.read(1024), dtype=np.int16)
     decibel = get_decibel(data)
     write_to_log(decibel, current_file)
-    print(f"Recorded {decibel} dB at {now.strftime('%H:%M:%S')}")  # printing for visibility
+    # print(f"Recorded {decibel} dB at {now.strftime('%H:%M:%S')}")  # printing for visibility
     
     # Upload the file one minute before the top of the hour
     if now.minute == 59 and now.second == 0:
         upload_to_sftp(current_file, config)
+        
+        try:
+            body = {
+                'data': miner_key,
+                'deviceMac': mac_list
+            }
+            response = requests.post(url, json=body)
+
+            if response.status_code == 200:
+                print(response.json())
+            else:
+                print(f"Error: {response.status_code}")
+        except requests.exceptions.RequestException as e:
+            print(f"An error occurred: {e}")
 
     # Update the filename at the top of the hour
     if now.minute == 0 and now.second == 0 and now.hour != last_upload_hour:
-        current_file = f"FRYdecibels_{mac}_{now.strftime('%m%d%Y_%H%M%S')}.log"
+        current_file = f"FRYdecibels_{miner_key}_{now.strftime('%m%d%Y_%H%M%S')}.log"
         last_upload_hour = now.hour
